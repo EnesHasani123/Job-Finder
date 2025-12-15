@@ -1,0 +1,452 @@
+Project: Job Finder
+Path: /Users/eneshasani/Desktop/Job Finder
+
+This file explains every important file in the repository in detail, including why things were declared, what each function/constant does, and how data flows between backend and frontend. Use this as a developer reference.
+
+----------------------------
+Top-level files
+----------------------------
+
+.gitignore
+  - Purpose: standard git ignore file. Keeps node_modules, env files, and other local artifacts out of git.
+
+package-lock.json
+  - Purpose: npm lockfile for reproducible installs. Auto-generated.
+
+node_modules/
+  - Purpose: installed packages. Not checked into git.
+
+README.md (not present)
+  - Note: project README is not present at repo root. Consider adding one summarizing quick start.
+
+----------------------------
+backend/
+----------------------------
+
+package.json (backend/package.json)
+  - Purpose: backend dependency manifest.
+  - Key fields:
+    - "dependencies": express, cors, node-cron, pg, playwright.
+    - "devDependencies": @playwright/test, @types/node.
+    - Added script: "start": "node src/server.js" (runs the Express server)
+
+run.js (backend/run.js)
+  - Purpose: a small test runner file intended for manual scraping experiments.
+  - Current behavior: imports `scrapeDuapune` (older import path) and calls it, printing scraped jobs.
+  - Note: the file imports `./scraper.js` but repository uses `src/scraper/duapune.js` and `src/scraper/run.js`. This file may be an old/unused artifact; keep for quick experiments or update to the current scraper import if you want to use it.
+
+example.spec.ts (backend/example.spec.ts)
+  - Purpose: sample Playwright test file created by Playwright. Shows how to write tests with Playwright's test runner.
+  - Not required for production, useful for development and testing of scraping functionality.
+
+playwright.config.ts (backend/playwright.config.ts)
+  - Purpose: configuration for Playwright tests. Points testDir to `./scraper` and contains project/browser configs.
+  - Note: contains commented `webServer` config if you want Playwright to start the app before tests run.
+
+src/server.js
+  - Path: backend/src/server.js
+  - Purpose: main Express server that exposes API endpoints.
+  - Key lines:
+    - `import './cron/updater.js'` — side-effect import: this file registers a cron job when the server process starts. That means starting the server will also schedule the scraper to run periodically. If you don't want the scraper to run in the same process, remove this import and run scrapers separately.
+    - `app.use('/api/jobs', jobsRouter)` — mounts the jobs API router.
+    - `app.listen(4000, ...)` — server listens on port 4000 by default.
+
+  - Flow: when server starts it:
+    1. Imports cron/updater which schedules scraping every 30 minutes.
+    2. Registers `/api/jobs` route (see `src/api/jobs.js`).
+    3. Starts listening on port 4000.
+
+src/api/jobs.js
+  - Path: backend/src/api/jobs.js
+  - Purpose: defines the Express router `jobsRouter` used at `/api/jobs`.
+  - Key exports: `export const jobsRouter = express.Router();`
+  - Behavior:
+    - GET /api/jobs
+      - If query `search` is provided, runs a SQL query with `ILIKE $1` (case-insensitive) using `%${search}%` and returns matching rows ordered by id DESC.
+      - If no search parameter, returns all jobs ordered by id DESC.
+    - Error handling: catches DB errors and responds with 500 and `{ error: 'server error' }`.
+
+  - Important detail: `jobs` rows come directly from the `jobs` table described in `db/schema.sql`. The API returns the DB rows as JSON; the frontend expects objects with fields like `id, title, company, location, tag, date, expire, apply, link, created_at`.
+
+src/cron/updater.js
+  - Path: backend/src/cron/updater.js
+  - Purpose: schedules the scraper to run periodically using `node-cron`.
+  - Key lines:
+    - `cron.schedule('*/30 * * * *', async () => { ... })` — runs every 30 minutes (on minute 0 and 30).
+      - Why this format: `*/30 * * * *` means every 30 minutes in cron syntax.
+    - In the scheduled job it calls `scrapeDuapune()` and `saveJobsToDB(jobs)` to persist results to database.
+  - Side-effect: importing this file registers the cron schedule immediately. That's why `src/server.js` imports it: starting the server will also start the cron.
+
+src/db/index.js
+  - Path: backend/src/db/index.js
+  - Purpose: creates and exports a `pg.Pool` instance used to query the Postgres DB.
+  - Key constant:
+    - `export const db = new Pool({ user: 'eneshasani', host: 'localhost', database: 'jobfinder', password: '', port: 5432 })`
+    - This is hard-coded for development. For production, replace these values with environment variables and do not commit secrets.
+  - Usage: other backend modules import `{ db }` and call `db.query(...)` to run SQL.
+
+src/db/schema.sql
+  - Purpose: SQL schema to create the `jobs` table.
+  - Key columns: `id SERIAL PRIMARY KEY`, `title TEXT`, `company TEXT`, `location TEXT`, `tag TEXT`, `date TEXT`, `expire TEXT`, `apply TEXT`, `link TEXT UNIQUE`, `created_at TIMESTAMP DEFAULT NOW()`.
+  - The `link` column is UNIQUE so `ON CONFLICT (link) DO NOTHING` can be used to avoid duplicate inserts.
+
+src/scraper/duapune.js
+  - Path: backend/src/scraper/duapune.js
+  - Purpose: contains two exported functions `scrapeDuapune()` and `saveJobsToDB(jobs)` used by the scraper.
+
+  - scrapeDuapune()
+    - What it does:
+      1. Launches a Playwright Chromium browser headless: `chromium.launch({ headless: true })`.
+      2. Opens a new page and navigates to `https://duapune.com` with `waitUntil: 'networkidle'` so the page is loaded before scraping.
+      3. Uses `page.$$eval('.job-listing', items => items.map(...))` to run a browser-side mapping function that returns an array of job objects.
+    - Why certain choices exist:
+      - `headless: true` makes the browser run without UI; set to `false` during debugging to watch the scraping run.
+      - `$$eval` runs the DOM query in page context; selectors like `.job-title`, `.main-jobs-tag`, `.job-details a` are used to pick the specific node texts/links.
+    - Output shape (array of objects): each job has fields: `title, link, company, tag, location, date, expire, apply`.
+
+  - saveJobsToDB(jobs)
+    - What it does: iterates over `jobs` and runs an `INSERT INTO jobs (...) VALUES (...) ON CONFLICT (link) DO NOTHING` for each job using parameterized queries (`$1..$8`).
+    - Why ON CONFLICT: prevents insertion of the same job twice (duplicate `link`). This is idempotent and safe to run often.
+    - Error handling: logs DB errors but continues with the loop.
+
+src/scraper/run.js
+  - Path: backend/src/scraper/run.js
+  - Purpose: a small script that runs `scrapeDuapune()` once, logs the count, and saves to DB by calling `saveJobsToDB()`.
+  - Behavior:
+    - `async function runScrapers() { const jobs = await scrapeDuapune(); if (jobs.length === 0) { console.log('No jobs scraped...'); return; } await saveJobsToDB(jobs); }`
+    - The file calls `runScrapers()` then exits the process with 0 or 1 depending on success.
+  - Use-case: run manually (e.g., `node src/scraper/run.js`) to test the scraper without starting the server or cron.
+
+----------------------------
+frontend/
+----------------------------
+
+package.json (frontend/package.json)
+  - Purpose: frontend dependency manifest. Contains scripts:
+    - "dev": "vite"
+    - "build": "vite build"
+    - "preview": "vite preview"
+  - Dependencies: `react`, `react-dom`.
+  - DevDependency: `vite`.
+
+vite.config.js (frontend/vite.config.js)
+  - Purpose: config for Vite dev server.
+  - Key setting: `server.proxy['/api']` points to `http://localhost:4000` so that during dev the frontend can make requests to `/api/jobs` and Vite forwards them to the backend.
+  - If backend runs on different port, update this `target` value.
+
+index.html (frontend/index.html)
+  - Purpose: HTML entry for Vite. Loads `src/main.jsx` and the `Inter` font.
+  - Note: includes `<link rel="stylesheet" href="/src/styles.css">` so CSS file is loaded from Vite dev server.
+
+src/main.jsx
+  - Purpose: React entry, wires App into `#root`.
+  - Key line: `createRoot(document.getElementById('root')).render(<React.StrictMode><App/></React.StrictMode>)`.
+
+src/App.jsx
+  - Purpose: top-level React component. Fetches jobs from `/api/jobs`, maintains UI state, and renders `Navbar`, `JobList`, and `Footer`.
+  - Important constants and state:
+    - `const SAMPLE = [...]` — an array of sample job objects used as a fallback if the API cannot be reached. This ensures the UI remains usable offline or during backend downtime.
+    - `const [jobs, setJobs] = useState([])` — holds the list of jobs shown in the UI. Initially empty.
+    - `const [loading, setLoading] = useState(true)` — tracks whether we are loading data.
+    - `const [error, setError] = useState(null)` — records fetch errors.
+    - `const [query, setQuery] = useState('')` — text used for client-side filtering/search.
+
+  - useEffect in `App.jsx` (detailed explanation):
+    - What it does: when the App mounts it runs an async `load()` function that calls `fetch('/api/jobs')`.
+    - Why useEffect: we want to run the network request only once when the component mounts and not on every render. `useEffect(..., [])` provides this behavior.
+    - Code flow inside useEffect:
+      1. `let cancelled = false` — a flag to prevent state updates if the component unmounts before the fetch completes.
+      2. `const res = await fetch('/api/jobs')` — requests the jobs endpoint (Vite will proxy this to backend during dev).
+      3. If `res.ok` is false, throws an error and falls into catch.
+      4. On success: `const data = await res.json(); if (!cancelled) setJobs(data)` — store result in `jobs` state.
+      5. On error: logs a warning and `setJobs(SAMPLE)` as fallback, and records `setError(err)`.
+      6. finally: sets `loading` to false (unless cancelled).
+      7. cleanup: `return () => (cancelled = true)` prevents setState on unmounted components.
+    - Why the cancel pattern: avoids React state update warnings when an async operation completes after the component unmounted.
+
+  - Filtering logic (`useMemo`) in `App.jsx`:
+    - `const visible = useMemo(() => { const q = query.trim().toLowerCase(); if (!q) return jobs; return jobs.filter(...) }, [jobs, query])`.
+    - Why useMemo: avoids recalculating the filtered array on every render unless `jobs` or `query` change; improves performance for larger lists.
+    - Filter behavior: concatenates `title`, `tag`, `location`, `company` and checks if `q` is included (case-insensitive).
+
+  - Rendering behavior: shows a loading message while `loading === true`; otherwise renders `JobList` with `visible` jobs. If `error` is set, shows a notice that cached data is displayed.
+
+src/components/Navbar.jsx
+  - Props: `query`, `setQuery`.
+  - Purpose: top nav with brand, search input, and links.
+  - Important detail: the search `<input>` uses `onChange={e => setQuery(e.target.value)}` so typing immediately updates App's `query` state — this triggers the `useMemo` filter and updates JobList in real time.
+
+src/components/JobList.jsx
+  - Props: `jobs` (array).
+  - Purpose: Renders a grid of job cards. If `jobs` is empty, shows "No jobs found." message.
+
+src/components/JobCard.jsx
+  - Props: `job` (single job object from DB/API).
+  - Purpose: Shows job title, tag, location, expiry/date, and two buttons: "Employer" (job.link) and "Apply" (job.apply).
+  - Key helper: `cleanTitle(t)` replaces newlines with ` — ` and trims whitespace. This cleans titles that include linebreaks when scraped (e.g., `"Title\nCompany"`).
+
+src/components/Footer.jsx
+  - Purpose: simple footer with brand and links.
+
+src/styles.css
+  - Purpose: theme and layout styles for the app. Provides responsive grid for cards and a modern dark gradient background.
+  - Key variables: CSS custom properties like `--accent` used for brand color.
+
+frontend/README.md
+  - Purpose: quick start for frontend: `npm install` and `npm run dev` and explanation that frontend proxies `/api` to backend.
+
+----------------------------
+Data shapes and examples
+----------------------------
+
+Jobs (what the backend returns / frontend expects):
+  - Example object:
+    {
+      id: 151,
+      title: "Drejtoreshe Poste\\nMail Boxes Etc. Albania",
+      company: "",
+      location: "Tirane",
+      tag: "Drejtor Dege",
+      date: "09-01-2026",
+      expire: "edhe 25 ditë",
+      apply: "https://duapune.com/jobs/..",
+      link: "https://duapune.com/employers/...",
+      created_at: "2025-12-15T08:58:59.378Z"
+    }
+
+  - Notes:
+    - `title` may contain a newline separating title + employer; `JobCard.cleanTitle` normalizes this.
+    - `link` is used as a unique field; DB schema enforces `UNIQUE` on it.
+
+----------------------------
+Run order (concise)
+----------------------------
+1. Start DB (Postgres) if used by backend. Create database `jobfinder` and ensure `db/index.js` credentials match, or set up env vars.
+2. Backend (from repo root):
+   cd backend
+   npm install   # if not done
+   npm start     # runs `node src/server.js` -> server listens on 4000 and cron starts
+3. Frontend (in a new terminal):
+   cd frontend
+   npm install   # if not done
+   npm run dev   # starts Vite on http://localhost:5173 and proxies /api to localhost:4000
+
+----------------------------
+Troubleshooting & tips
+----------------------------
+- If Playwright scrapers fail, ensure browsers are installed:
+    npx playwright install
+  and if running on Linux, install system dependencies as described by Playwright docs.
+- If DB connection fails, edit `backend/src/db/index.js` to point to the right host/credentials or convert to environment variables
+  e.g. use `process.env.PGUSER` / `.env` file + `dotenv` (not included by default).
+- If the cron runs inside the server process and you prefer separate runs, remove the `import './cron/updater.js'` line from `src/server.js` and run `node src/scraper/run.js` via a system cron or a process manager.
+- To run the scraper once manually (no server):
+    cd backend
+    node src/scraper/run.js
+
+----------------------------
+Next recommended small changes
+----------------------------
+1. Move DB credentials to environment variables and add `.env.example`.
+2. Add a `start-dev` script or a `dev` script at repo root that starts both services (or a `docker-compose.yml`).
+3. Add tests for the API routes and for the scraper selectors so changes to the target site don't silently break data extraction.
+
+----------------------------
+Contact
+----------------------------
+If anything in this explanation is out of date (selectors changed, file moved, or new files added), re-run `git status` and update this file accordingly.
+
+End of FILES_EXPLAINED.txt
+Project file reference — detailed explanations
+===========================================
+
+This file documents the purpose and important implementation/details for the main files in this repository (backend + frontend). Use it as a single reference for what each file does, where to change configuration, and runtime notes.
+
+Top-level
+----------
+- .git/
+  - Git repository metadata. Not to be edited directly.
+
+- .gitignore
+  - Standard list of files/folders that git should ignore (node_modules, build artifacts, etc.). Check it if you want to add/remove ignored entries.
+
+- package-lock.json
+  - Lockfile for the top-level npm install (if used). Provides deterministic dependency versions. Generally updated automatically by npm.
+
+Backend (folder: `backend/`)
+--------------------------------
+Purpose: an Express-based API server, a scraper using Playwright, and a small scheduler (cron) that runs the scraper periodically and persists results into Postgres.
+
+- backend/package.json
+  - npm manifest for the backend. Key pieces:
+    - `type: "module"` — enables ES module import syntax (import/export) in Node.
+    - `dependencies` — lists runtime deps: express, cors, node-cron, pg, playwright, etc.
+    - `scripts.start` — (added) runs `node src/server.js` to start the API server.
+  - Edit this if you want to add start scripts, environment-specific scripts, or dependency versions.
+
+- backend/package-lock.json
+  - Lockfile for backend; provides exact dependency tree used when `npm install` was last run.
+
+- backend/run.js
+  - A small test script (top-level in backend folder) that imports the scraper and runs it once, printing the scraped jobs to console. Useful for quick local testing of the scraper without running the full API or DB.
+
+- backend/example.spec.ts
+  - Playwright test examples. These are sample automated tests using Playwright Test; not used by the backend server but useful for browser automation testing.
+
+- backend/playwright.config.ts
+  - Playwright Test configuration. Controls which browsers to run tests in, test directory, and other test runner settings. Points `testDir` at `./scraper` by default.
+  - If you plan to run tests, you can update this to point to a different baseURL or enable `webServer` to start the backend automatically for tests.
+
+Backend source: `backend/src/`
+--------------------------------
+- backend/src/server.js
+  - The Express application entry point.
+  - Key behaviors:
+    - Imports and starts the cron updater (which schedules scraping).
+    - Imports `jobsRouter` and mounts it at `/api/jobs`.
+    - Starts the server listening on port 4000 (console logs `Server running on http://localhost:4000`).
+  - To change the port, edit this file (the port number is hard-coded to 4000). You can also change startup behavior, CORS policy, or add middleware here.
+
+- backend/src/api/jobs.js
+  - Exposes an Express Router at `/` which is mounted as `/api/jobs` in `server.js`.
+  - GET `/api/jobs`:
+    - Optional `search` query param: performs a simple SQL ILIKE on `title` or `company`.
+    - Otherwise returns all jobs ordered by newest `id DESC`.
+  - Error handling: logs errors to console and returns HTTP 500 with a JSON error message.
+  - Important: queries use `db.query` and expect a Postgres connection pool.
+
+- backend/src/cron/updater.js
+  - Uses `node-cron` to schedule periodic scraping.
+  - Current schedule: `*/30 * * * *` — runs the scraper every 30 minutes.
+  - On each run: calls `scrapeDuapune()` then `saveJobsToDB(jobs)` and logs the inserted count.
+  - To disable or change the schedule, edit this file. For manual runs, see `backend/src/scraper/run.js`.
+
+- backend/src/db/index.js
+  - Database connection module. Exports a `pg.Pool` named `db` configured with connection details:
+    - user: `eneshasani`
+    - host: `localhost`
+    - database: `jobfinder`
+    - password: `` (empty string)
+    - port: 5432
+  - IMPORTANT: These credentials are hard-coded. In production or shared environments you should:
+    - Move them to environment variables (process.env.DB_USER etc.)
+    - Or use a `.env` file and a loader like dotenv.
+  - The pool is used by API and scraper modules to run SQL queries.
+
+- backend/src/db/schema.sql
+  - SQL schema used to create the `jobs` table. Main columns:
+    - id (SERIAL primary key)
+    - title, company, location, tag, date, expire, apply (TEXT)
+    - link (TEXT UNIQUE) — used to prevent duplicate inserts from scraper
+    - created_at (TIMESTAMP DEFAULT NOW())
+  - Apply this schema to your Postgres DB before running the server: `psql -d jobfinder -f backend/src/db/schema.sql` (or run equivalent DDL).
+
+- backend/src/scraper/duapune.js
+  - Scraper implementation using Playwright (Chromium). Exports two functions:
+    - `scrapeDuapune()`
+      - Launches a headless Chromium, goes to `https://duapune.com`, queries DOM elements with selectors (e.g., `.job-listing`, `.job-title`, `.apply-job`) and returns an array of job objects.
+      - The selector logic (`$$eval` mapping) determines what fields get scraped: title, link, company, tag, location, date, expire, apply.
+      - Note: scrapers are brittle — if page markup changes the selectors will need to be updated.
+    - `saveJobsToDB(jobs)`
+      - Iterates over scraped jobs and inserts each into the Postgres `jobs` table using parameterized queries.
+      - Uses `ON CONFLICT (link) DO NOTHING` to avoid duplicates by `link`.
+      - Errors per row are logged to console.
+  - Dependencies: Playwright browsers must be installed with `npx playwright install` if not present. The server currently launches Chromium headlessly.
+
+- backend/src/scraper/run.js
+  - A small runner that calls `scrapeDuapune()` then `saveJobsToDB()` and exits.
+  - Useful for one-off runs, debugging scrapers, or running from a scheduler outside the cron defined in `cron/updater.js`.
+
+Frontend (folder: `frontend/`)
+--------------------------------
+Purpose: A small React app (Vite) that fetches `/api/jobs` and displays job cards with a navbar, search, and footer.
+
+- frontend/package.json
+  - npm manifest for the frontend app. Contains scripts:
+    - `dev` — runs `vite` (development server)
+    - `build` — builds a production bundle using Vite
+    - `preview` — serves the built production bundle locally
+  - Dependencies: `react`, `react-dom`; devDependency: `vite`.
+
+- frontend/vite.config.js
+  - Vite configuration. Contains a `server.proxy` rule:
+    - Proxies `/api` requests to `http://localhost:4000` during `npm run dev`.
+    - This allows the frontend dev server (port 5173) to make same-origin calls to `/api/jobs` which get forwarded to the backend.
+  - If your backend uses another port, update the `target` here.
+
+- frontend/index.html
+  - HTML entry used by Vite. Loads the `Inter` font, includes `src/styles.css` and bootstraps the React app with `src/main.jsx` into the `#root` element.
+
+- frontend/src/main.jsx
+  - React entry file. Creates a root with React 18 `createRoot` and renders `<App />` inside `#root`.
+
+- frontend/src/App.jsx
+  - Main application component and core logic. Responsibilities:
+    - On mount, fetches `/api/jobs`.
+      - If fetch succeeds, stores the jobs in state.
+      - If fetch fails, logs a warning and falls back to `SAMPLE` static job data for demos.
+    - Provides a simple search input (wired via `Navbar`) that filters jobs by title/tag/location/company.
+    - Displays loading state, error notice and passes visible jobs down to `JobList`.
+  - Important notes:
+    - The fallback sample data is useful for local demos if the backend isn't running.
+    - Fetch calls rely on the Vite proxy to reach the backend at `/api/jobs`.
+
+- frontend/src/components/Navbar.jsx
+  - Simple header with brand, search input, and a few placeholder links.
+  - The search input is controlled and passes the query back to `App` via `setQuery`.
+
+- frontend/src/components/JobList.jsx
+  - Renders a responsive grid of `JobCard` components.
+  - Shows a `No jobs found` message when the list is empty.
+
+- frontend/src/components/JobCard.jsx
+  - Visual component for a single job card.
+  - Cleans multiline titles (replaces newlines with ` — `), renders tag, location, expiry and date, and provides two buttons:
+    - `Employer` — opens the employer `link` in a new tab
+    - `Apply` — opens the job application `apply` URL in a new tab
+
+- frontend/src/components/Footer.jsx
+  - Simple footer with site name and a few links.
+
+- frontend/src/styles.css
+  - App-wide styles. Defines color variables, layout containers, responsive grid for job cards, and styles for buttons, navbar and footer.
+
+- frontend/README.md
+  - Developer instructions (added by me) with quick start steps to run the frontend: `npm install` and `npm run dev`.
+
+Other notes and runtime considerations
+------------------------------------
+- Databases
+  - The backend expects a Postgres database accessible with the credentials in `backend/src/db/index.js`:
+    - DB user `eneshasani`, DB name `jobfinder`, host `localhost`, port `5432`.
+  - You must create the database and apply `schema.sql` before the scraper or API will function correctly.
+    Example:
+      createdb jobfinder
+      psql -d jobfinder -f backend/src/db/schema.sql
+
+- Playwright/browser dependencies
+  - The scraper uses Playwright. If you run scraping code or Playwright tests, install browsers by running:
+      npx playwright install
+  - Playwright may require additional system dependencies depending on your OS (see Playwright docs). On macOS it's usually straightforward.
+
+- Environment / Security
+  - Currently DB credentials are hard-coded in `backend/src/db/index.js`. Move these to environment variables for safety when sharing or deploying.
+  - Consider adding a `.env` and using `dotenv` (or environment-based configuration) so secrets aren't committed.
+
+- Starting order (server -> frontend)
+  1. Ensure Postgres is running and `jobfinder` database exists with schema applied.
+  2. In `backend/`: `npm install` (if not already), then `npm start` (or `node src/server.js`). Server binds to port 4000.
+  3. In `frontend/`: `npm install` (if not already), then `npm run dev`. Vite dev server (default port 5173) will proxy `/api` to `http://localhost:4000`.
+
+- Troubleshooting
+  - If the frontend fails to fetch, ensure backend is running and `vite.config.js` proxy target matches backend port.
+  - If scraper returns `0` jobs, open the target site in a browser and inspect the DOM. Selectors in `duapune.js` (e.g. `.job-listing`, `.job-title`) may need updates.
+  - If Playwright fails to start, run `npx playwright install` and follow any OS-specific instructions for missing dependencies.
+
+If you'd like, I can also:
+- Generate a single `README.md` that includes these sections and runnable scripts.
+- Replace hard-coded DB credentials with environment variables and a `.env.example`.
+- Add a small `scripts/manage.sh` or `pm2` config to start/stop both services cleanly.
+
+---
+Generated on: 2025-12-15
