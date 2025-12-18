@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   company TEXT,
   location TEXT,
   tag TEXT,
+  source TEXT,
   date TEXT,
   expire TEXT,
   apply TEXT,

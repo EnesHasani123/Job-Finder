@@ -16,6 +16,7 @@ const SAMPLE = [
     apply:
       "https://duapune.com/jobs/109647-drejtoreshe-poste",
     link: "https://duapune.com/employers/mail-boxes-etc-albania",
+    source: "duapune",
   },
   {
     id: 148,
@@ -28,6 +29,7 @@ const SAMPLE = [
     apply:
       "https://duapune.com/jobs/109550-ndihmes-kuzhinier",
     link: "https://duapune.com/employers/quick-bite",
+    source: "duapune",
   },
   {
     id: 147,
@@ -40,6 +42,7 @@ const SAMPLE = [
     apply:
       "https://duapune.com/jobs/109554-agjent-e-shitjesh-part-time",
     link: "https://duapune.com/employers/the-glam-house",
+    source: "duapune",
   },
   {
     id: 146,
@@ -52,6 +55,7 @@ const SAMPLE = [
     apply:
       "https://duapune.com/jobs/109534-menaxher-produkti",
     link: "https://duapune.com/employers/abissnet-sh-a",
+    source: "duapune",
   },
 ];
 
@@ -60,12 +64,21 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [query, setQuery] = useState("");
+  // source controls which site's jobs we show (e.g. 'duapune' or 'kosovajob')
+  const [source, setSource] = useState("duapune");
 
   useEffect(() => {
     let cancelled = false;
     async function load() {
       try {
-        const res = await fetch("/api/jobs");
+        // build URL with source filter
+        const params = new URLSearchParams();
+        if (source) params.set("source", source);
+        const url = `/api/jobs${
+          params.toString() ? `?${params.toString()}` : ""
+        }`;
+
+        const res = await fetch(url);
         if (!res.ok)
           throw new Error("Network response not ok");
         const data = await res.json();
@@ -76,7 +89,13 @@ export default function App() {
           "Failed to fetch /api/jobs, using sample data:",
           err.message
         );
-        if (!cancelled) setJobs(SAMPLE);
+        if (!cancelled)
+          setJobs(
+            SAMPLE.map((s) => ({
+              ...s,
+              source: s.source || "duapune",
+            }))
+          );
         setError(err);
       } finally {
         if (!cancelled) setLoading(false);
@@ -84,7 +103,7 @@ export default function App() {
     }
     load();
     return () => (cancelled = true);
-  }, []);
+  }, [source]);
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -99,7 +118,12 @@ export default function App() {
 
   return (
     <div className="app-root">
-      <Navbar query={query} setQuery={setQuery} />
+      <Navbar
+        query={query}
+        setQuery={setQuery}
+        source={source}
+        setSource={setSource}
+      />
 
       <main className="container">
         <section className="hero">

@@ -1,6 +1,16 @@
 import React from "react";
 
-export default function Navbar({ query, setQuery }) {
+export default function Navbar({
+  query,
+  setQuery,
+  source,
+  setSource,
+}) {
+  const handleLink = (e, s) => {
+    e.preventDefault();
+    if (setSource) setSource(s);
+  };
+
   return (
     <header className="nav">
       <div className="nav-inner container">
@@ -16,9 +26,23 @@ export default function Navbar({ query, setQuery }) {
         </div>
 
         <nav className="links">
-          <a href="#">Home</a>
+          <a
+            href="#"
+            onClick={(e) => handleLink(e, "duapune")}
+            className={source === "duapune" ? "active" : ""}
+          >
+            Duapune
+          </a>
+          <a
+            href="#"
+            onClick={(e) => handleLink(e, "kosovajob")}
+            className={
+              source === "kosovajob" ? "active" : ""
+            }
+          >
+            Kosovajob
+          </a>
           <a href="#">About</a>
-          <a href="#">Post a job</a>
         </nav>
       </div>
     </header>

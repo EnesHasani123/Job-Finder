@@ -33,6 +33,8 @@ export async function scrapeDuapune() {
         job.querySelector(".expire")?.innerText.trim() ||
         "",
       apply: job.querySelector(".apply-job")?.href || "",
+      // mark the source so we can filter by origin
+      source: "duapune",
     }))
   );
 
@@ -44,14 +46,15 @@ export async function saveJobsToDB(jobs) {
   for (const j of jobs) {
     try {
       await db.query(
-        `INSERT INTO jobs (title, company, location, tag, date, expire, apply, link)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        `INSERT INTO jobs (title, company, location, tag, source, date, expire, apply, link)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
          ON CONFLICT (link) DO NOTHING`,
         [
           j.title,
           j.company,
           j.location,
           j.tag,
+          j.source || "duapune",
           j.date,
           j.expire,
           j.apply,
